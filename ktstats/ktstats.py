@@ -29,12 +29,17 @@ class KtRoll(object):
 
     def map_rerolls(self, value):
         hits = list(value[0])
-        for reroll in list(value[1]):
-            if reroll == 'Crit' and 'Miss' in hits:
+        misses = [x for x in hits if x == 'Miss']
+        rerolls = list(value[1])
+        for miss in misses:
+            if len(rerolls) == 0:
+                break
+            reroll = rerolls.pop()
+            if reroll == 'Crit':
                 hits.remove('Miss')
                 hits.insert(0, 'Crit')
                 continue
-            if reroll == 'Success' and 'Miss' in hits:
+            if reroll == 'Success':
                 hits.remove('Miss')
                 hits = [x for x in hits if x == 'Crit'] + ['Success'] + [x for x in hits if x != 'Crit']
                 continue
