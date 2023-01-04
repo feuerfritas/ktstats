@@ -5,12 +5,15 @@ import operator
 class KtRoll(object):
 
     def __init__(self, target, crit_value=6):
-        self.base_roll = lea.interval(1,6).map(
-            lambda x: 'Crit' if x >= crit_value else 'Success' if x>= target else 'Miss'
-        )
+        self.crit_value = crit_value
+        self.target = target
+        self.base_roll = lea.interval(1,6)
+
+    def check_success(self, roll_values):
+        return tuple(['Crit' if roll_value >= self.crit_value else 'Success' if roll_value >= self.target else 'Miss' for roll_value in list(roll_values)])
 
     def roll(self, amount, rerolls=0, normal_retains=0, crit_retains=0, miss_retains=0):
-        roll = self.base_roll.draw(amount, replacement=True)
+        roll = self.base_roll.draw(amount, replacement=True).map(self.modify_rolls).map(self.check_success)
         normal_retains = min(amount, normal_retains)
         crit_retains = min(amount, crit_retains)
         miss_retains = min(amount, miss_retains)
@@ -24,8 +27,12 @@ class KtRoll(object):
             )
         return lea.joint(
             roll,
-            self.base_roll.draw(rerolls, replacement=True)
+            self.base_roll.draw(rerolls, replacement=True).map(self.check_success)
         ).map(self.map_rerolls)
+
+    # placeholder method for factions that can modify their rolls
+    def modify_rolls(self, value):
+        return value
 
     def map_rerolls(self, value):
         hits = list(value[0])
@@ -44,6 +51,51 @@ class KtRoll(object):
                 hits = [x for x in hits if x == 'Crit'] + ['Success'] + [x for x in hits if x != 'Crit']
                 continue
         return tuple(hits)
+
+
+class KasrkinRoll(KtRoll):
+
+    def __init__(self, target, crit_value=6, elite_points=0):
+        self.elite_points = elite_points
+        super().__init__(target, crit_value=6)
+
+    def modify_rolls(self, roll_values):
+        elite_points = self.elite_points
+        final_rolls = []
+        misses = [x for x in list(roll_values) if x < self.target]
+        misses.sort()
+        misses.reverse()
+        hits = [x for x in list(roll_values) if x >= self.target]
+        hits.sort()
+        hits.reverse()
+        for roll in misses + hits:
+            if roll + elite_points >= self.crit_value:
+                elite_points = 0
+                final_rolls.append(self.crit_value)
+            elif roll < self.target and roll + elite_points >= self.target:
+                elite_points = 0
+                final_rolls.append(self.target)
+            else:
+                final_rolls.append(roll)
+        return tuple(final_rolls)
+
+
+class KasrkinRoll1p(KasrkinRoll):
+
+    def __init__(self, target, crit_value=6):
+        super().__init__(target, crit_value=6, elite_points=1)
+
+
+class KasrkinRoll2p(KasrkinRoll):
+
+    def __init__(self, target, crit_value=6):
+        super().__init__(target, crit_value=6, elite_points=2)
+
+class KasrkinRoll3p(KasrkinRoll):
+
+    def __init__(self, target, crit_value=6):
+        super().__init__(target, crit_value=6, elite_points=3)
+
 
 # kt_roll(3,4)
 # ktd6 = lea.interval(1,6).map(
@@ -85,7 +137,7 @@ class Weapon(object):
     rending = False
     p = 0
 
-    def __init__(self, name, attacks, bs, nd, cd, special_rules=None, crit_rules=None):
+    def __init__(self, name, attacks, bs, nd, cd, special_rules=None, crit_rules=None, dice_class=KtRoll):
         self.name = name
         self.attacks = attacks
         self.bs = bs
@@ -110,6 +162,7 @@ class Weapon(object):
         if 'Lethal 5+' in self.special_rules:
             self.critical_on = 5
         self.crit_rules = crit_rules or []
+        self.dice_class = dice_class
 
     def plot_shoot(self, *kargs, **kwargs):
         desc = ''
@@ -122,7 +175,7 @@ class Weapon(object):
 
     def shoot(self, target, cover=0, attack_rerolls=0, save_rerolls=0):
         damage_probs = lea.joint(
-            KtRoll(self.bs, self.critical_on).roll(self.attacks, attack_rerolls),
+            self.dice_class(self.bs, self.critical_on).roll(self.attacks, attack_rerolls),
             target.save().roll(target.get_defense() - self.ap, save_rerolls, normal_retains=cover if not self.no_cover else 0)
         ).map(self.resolve_saves).map(self.damage)
         if target.ignore_wounds_on > 0:
