@@ -61,10 +61,11 @@ class Target(object):
 
     ignore_wounds_on = 0
 
-    def __init__(self, df, sv, ignore_wounds_on=0):
+    def __init__(self, df, sv, ignore_wounds_on=0, wounds=0):
         self.df = df
         self.sv = sv
         self.ignore_wounds_on = ignore_wounds_on
+        self.wounds = wounds
 
     def save(self):
         return KtRoll(self.sv)
@@ -131,7 +132,12 @@ class Weapon(object):
                     lea.event((6+1-target.ignore_wounds_on)/6)
                 ).map(self.generate_ignores)
             damage_probs = damage_probs.map(self.apply_ignores)
+        if target.wounds > 0:
+            damage_probs = damage_probs.map(lambda x: self.apply_wounds_limit(target.wounds, x))
         return damage_probs
+
+    def apply_wounds_limit(self, wounds, value):
+        return min(wounds, value)
 
     def apply_ignores(self, value):
         damage, ignores = value
