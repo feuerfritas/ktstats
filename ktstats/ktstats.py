@@ -107,15 +107,14 @@ class KasrkinRoll3p(KasrkinRoll):
 # a.given(a[0:crits_retains] == tuple(crits))
 # KtRoll(3, 6).roll(4, miss_retains=1)
 
-
-
 class Target(object):
 
     ignore_wounds_on = 0
 
-    def __init__(self, df, sv, ignore_wounds_on=0, wounds=0):
+    def __init__(self, df, sv, ignore_wounds_on=0, wounds=0, name=''):
         self.df = df
         self.sv = sv
+        self.name = name
         self.ignore_wounds_on = ignore_wounds_on
         self.wounds = wounds
 
@@ -126,7 +125,7 @@ class Target(object):
         return self.df
 
     def __str__(self):
-        return 'Sv: {} Df: {}{}'.format(self.sv, self.df, '' if self.ignore_wounds_on == 0 else ' ignore wounds on {}+'.format(self.ignore_wounds_on))
+        return '{} Sv: {} Df: {}{}'.format(self.name, self.sv, self.df, '' if self.ignore_wounds_on == 0 else ' ignore wounds on {}+'.format(self.ignore_wounds_on))
 
 
 class Weapon(object):
@@ -153,6 +152,8 @@ class Weapon(object):
             self.mw = 3
         if 'MW2' in self.special_rules:
             self.mw = 2
+        if 'MW1' in self.special_rules:
+            self.mw = 1
         if 'No Cover' in self.special_rules:
             self.no_cover = True
         if 'Rending' in self.special_rules:
@@ -232,6 +233,213 @@ class Weapon(object):
     def damage(self, results):
         hits, og_crits = results
         return self.cd*list(hits).count('Crit') + self.nd*list(hits).count('Success') + og_crits*self.mw
+
+
+class MeleeWeapon(object):
+    def __init__(self, name, attacks, ws, nd, cd, special_rules=None, crit_rules=None, dice_class=KtRoll):
+        self.name = name
+        self.attacks = attacks
+        self.ws = ws
+        self.nd = nd
+        self.cd = cd
+        self.critical_on = 6
+        self.special_rules = special_rules or []
+        if 'Rending' in self.special_rules:
+            self.rending = True
+        if 'Lethal 5+' in self.special_rules:
+            self.critical_on = 5
+        self.crit_rules = crit_rules or []
+        self.dice_class = dice_class
+    
+    def get_fight_roll(self, attack_rerolls=0):
+        return self.dice_class(
+            self.ws, self.critical_on
+        ).roll(
+            self.attacks,
+            min( # cap to min to reduce computation
+                self.attacks,
+                attack_rerolls + (
+                    1 if 'Balanced' in self.special_rules else 0
+                ) + (
+                    self.attacks if 'Relentless' in self.special_rules else 0
+                )
+            )
+        ).map(self.sort_roll)
+    
+    def sort_roll(self, roll_values):
+        rolls = list(roll_values)
+        return tuple(['Crit' for x in rolls if x == 'Crit'] + ['Success' for x in rolls if x == 'Success'] + ['Miss' for x in rolls if x == 'Miss'])
+
+    def damage(self, hits):
+        return self.cd*list(hits).count('Crit') + self.nd*list(hits).count('Success') + hits.count('Crit')*self.mw
+
+class Fight(object):
+    
+    def __init__(self, attacker, weapon1, defender, weapon2):
+        self.attacker = attacker
+        self.weapon1 = weapon1
+        self.defender = defender
+        self.weapon2 = weapon2
+        
+    def fight(self, attacker_rerolls=0, defender_rerolls=0):
+        return lea.joint(
+            self.weapon1.get_fight_roll(attacker_rerolls),
+            self.weapon2.get_fight_roll(defender_rerolls)
+        ).map(self.resolve_combat)
+
+    def try_kill(self, current, opponent):
+        if opponent['wounds'] - current['weapon'].cd <= 0 and 'Crit' in current['hits']:
+            opponent['wounds'] = max(0, opponent['wounds'] - current['weapon'].cd)
+            current['hits'].remove('Crit')
+            return True
+        if opponent['wounds'] - current['weapon'].nd <= 0 and 'Success' in current['hits']:
+            opponent['wounds'] = max(0, opponent['wounds'] - current['weapon'].nd)
+            current['hits'].remove('Success')
+            return True
+        return False
+
+
+    def try_parry(self, current, opponent):
+        decision = None
+        if opponent.weapon.damage(opponent['hits']) >= current.wounds and opponent.weapon.damage(opponent['hits'][1:]) < current.wounds:
+            if 'Crit' in opponent['hits'] and 'Crit' in current['hits']:
+                decision = 'use-crit-to-parry'
+            else:
+                if 'Success' in current['hits']:
+                    decision = 'use-success-to-parry'
+        if not decision and current.weapon.damage(current['hits'][1:]) >= opponent.wounds:
+            my_hits_copy = [x for x in current['hits']]
+        
+        if decision == 'use-crit-to-parry':
+            current['hits'].remove('Crit')
+            if 'Crit' in opponent['hits']:
+                opponent['hits'].remove('Crit')
+            else:
+                opponent['hits'].remove('Success')
+            return True
+        if decision == 'use-success-to-parry':
+            current['hits'].remove('Success')
+            opponent['hits'].remove('Success')
+            return True
+    
+    def resolve_combat(self, combat_rolls):
+        rolls1, rolls2 = combat_rolls
+        finished = False
+        current_fighter = {
+            'name': self.attacker.name,
+            'wounds': self.attacker.wounds,
+            'weapon': self.weapon1,
+            'hits': [x for x in list(rolls1) if x in ['Crit', 'Success']]
+        }
+        attacker = current_fighter
+        opponent = {
+            'name': self.defender.name,
+            'wounds': self.defender.wounds,
+            'weapon': self.weapon2,
+            'hits': [x for x in list(rolls2) if x in ['Crit', 'Success']]
+        }
+        defender = opponent
+        finished = False
+        while not finished:
+            # No-parry strategy
+            done_something = False
+            if self.try_kill(current_fighter, opponent):
+                done_something = True
+            elif self.try_parry(current_fighter, opponent):
+                done_something = True
+            else:
+                if 'Crit' in current_fighter['hits']:
+                    opponent['wounds'] = max(0, opponent['wounds'] - current_fighter['weapon'].cd)
+                    current_fighter['hits'].remove('Crit')
+                elif 'Success' in current_fighter['hits']:
+                    opponent['wounds'] = max(0, opponent['wounds'] - current_fighter['weapon'].nd)
+                    current_fighter['hits'].remove('Success')
+            if opponent['wounds'] == 0:
+                finished = True
+            if len(current_fighter['hits']) == 0 and len(opponent['hits']) == 0:
+                finished = True
+            current_fighter, opponent = opponent, current_fighter
+        return ((attacker['name'], attacker['wounds']), (defender['name'], defender['wounds']))
+
+
+# library
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import itertools
+
+# Create a dataset
+#df = pd.DataFrame(matrix, columns=["a","b","c","d","e"])
+ 
+# Default heatmap: just a visualization of this square matrix
+#sns.heatmap(df)
+
+class WeaponDamageProfile(object):
+    
+    def __init__(self, weapon):
+        self.weapon = weapon
+        
+    def generate_matrix(self):
+        target_probs = []
+        columns = []
+        targets = [
+            Target(3,3),
+            #Target(3,3, wounds=14),
+            Target(3,4),
+            #Target(3,4, wounds=10),
+            Target(3,5),
+            #Target(3,5, wounds=7),
+            #Target(3,5, wounds=19, ignore_wounds_on=5),
+            #Target(3,5, wounds=7, ignore_wounds_on=6)
+        ]
+        target_wounds = [x.wounds for x in targets]
+        max_damage = (self.weapon.cd + self.weapon.mw) * self.weapon.attacks + 1
+        num_rows = (max_damage) if 0 in target_wounds else (max(target_wounds) + 1)
+        for target in targets:
+            last = ['', '', '', '']
+            for cover_save, save_reroll, attack_reroll in itertools.product(range(1,-1, -1), range(1,-1, -1), range(3)):
+                # max damage is all crits or wound limit based on targets
+                base = [0] * num_rows
+                scenario = self.weapon.shoot(
+                    target,
+                    save_rerolls=save_reroll,
+                    attack_rerolls=attack_reroll,
+                    cover=cover_save
+                )
+                for (wounds, prob) in list(scenario.pmf_tuple):
+                    base[wounds] = prob * 100
+                target_probs.append(base)
+                current = [
+                    str(target),
+                    'has cover,' if cover_save == 1 else 'has no cover,' if cover_save == 0 else '{} cover,'.format(cover_save),
+                    'defense reroll,' if save_reroll == 1 else 'no defense reroll,' if save_reroll == 0 else '{} defense rerolls,'.format(save_reroll),
+                    'no attack reroll' if attack_reroll == 0 else '{} attack rerolls'.format(attack_reroll),
+                ]
+                diff = [ c if c != l else '' for (c, l) in zip(current, last)]
+                columns.append(' '.join(diff))
+                last = current
+            base = [0] * num_rows
+            target_probs.append(base)
+            columns.append('------')
+        target_probs.pop()
+        columns.pop()
+        return (target_probs, columns)
+
+from matplotlib import rcParams
+
+# figure size in inches
+rcParams['figure.figsize'] = [14, 10]
+
+def plot_heatmap(weapon):
+    probs, columns = WeaponDamageProfile(weapon).generate_matrix()
+    rcParams['figure.figsize'] = [len(columns)/3 + 1, len(probs)/8 + 1.5]
+    df = pd.DataFrame(np.transpose(probs), columns=columns)
+    ax = sns.heatmap(df, square=False, annot=True, fmt='.0f')
+    #ax = sns.heatmap(df, square=False, annot=False, fmt='.0f')
+    ax.invert_yaxis()
+    ax.set_title(weapon.name)
+
+
 
 #apply_damage(KtRoll(4).roll(3, rerolls=1),2, 3).plot()
 #apply_damage(KtRoll(3).roll(4, rerolls=1),5, 6).plot()
