@@ -242,6 +242,7 @@ class MeleeWeapon(object):
         self.ws = ws
         self.nd = nd
         self.cd = cd
+        self.mw = 0
         self.critical_on = 6
         self.special_rules = special_rules or []
         if 'Rending' in self.special_rules:
@@ -301,13 +302,13 @@ class Fight(object):
 
     def try_parry(self, current, opponent):
         decision = None
-        if opponent.weapon.damage(opponent['hits']) >= current.wounds and opponent.weapon.damage(opponent['hits'][1:]) < current.wounds:
+        if opponent['weapon'].damage(opponent['hits']) >= current['wounds'] and opponent['weapon'].damage(opponent['hits'][1:]) < current['wounds']:
             if 'Crit' in opponent['hits'] and 'Crit' in current['hits']:
                 decision = 'use-crit-to-parry'
             else:
                 if 'Success' in current['hits']:
                     decision = 'use-success-to-parry'
-        if not decision and current.weapon.damage(current['hits'][1:]) >= opponent.wounds:
+        if not decision and current['weapon'].damage(current['hits'][1:]) >= opponent['wounds']:
             my_hits_copy = [x for x in current['hits']]
         
         if decision == 'use-crit-to-parry':
@@ -318,9 +319,11 @@ class Fight(object):
                 opponent['hits'].remove('Success')
             return True
         if decision == 'use-success-to-parry':
-            current['hits'].remove('Success')
-            opponent['hits'].remove('Success')
-            return True
+            if 'Success' in opponent['hits']:
+                current['hits'].remove('Success')
+                opponent['hits'].remove('Success')
+                return True
+        return False
     
     def resolve_combat(self, combat_rolls):
         rolls1, rolls2 = combat_rolls
@@ -379,7 +382,7 @@ class WeaponDamageProfile(object):
     def __init__(self, weapon):
         self.weapon = weapon
         
-    def generate_matrix(self):
+    def generate_matrix(self, accumulated=True):
         target_probs = []
         columns = []
         targets = [
@@ -408,6 +411,10 @@ class WeaponDamageProfile(object):
                 )
                 for (wounds, prob) in list(scenario.pmf_tuple):
                     base[wounds] = prob * 100
+                if accumulated:
+                    for (wounds, prob) in reversed(list(enumerate(base))):
+                        if wounds < len(base) - 1:
+                            base[wounds] = base[wounds + 1] + base[wounds]
                 target_probs.append(base)
                 current = [
                     str(target),
@@ -430,14 +437,63 @@ from matplotlib import rcParams
 # figure size in inches
 rcParams['figure.figsize'] = [14, 10]
 
-def plot_heatmap(weapon):
-    probs, columns = WeaponDamageProfile(weapon).generate_matrix()
+def plot_heatmap(weapon, accumulated=True):
+    probs, columns = WeaponDamageProfile(weapon).generate_matrix(accumulated)
     rcParams['figure.figsize'] = [len(columns)/3 + 1, len(probs)/8 + 1.5]
     df = pd.DataFrame(np.transpose(probs), columns=columns)
     ax = sns.heatmap(df, square=False, annot=True, fmt='.0f')
     #ax = sns.heatmap(df, square=False, annot=False, fmt='.0f')
     ax.invert_yaxis()
-    ax.set_title(weapon.name)
+    ax.set_title('{} - prob to cause X damage {}'.format(weapon.name, 'or more' if accumulated else ''))
+
+def survives_or_not(wounds, fighter):
+    if wounds == 0:
+        return 'dead'
+    else:
+        return 'survives'
+
+def op_state(wounds, fighter):
+    if wounds == 0:
+        return 'dead'
+    if wounds < int(fighter.wounds / 2):
+        return 'injured'
+    if wounds == fighter.wounds:
+        return 'untouched'
+    else:
+        return 'survives'
+    
+    
+def kill_or_not(result, attacker, defender, show_state=False):
+    ar, dr = result
+    func = op_state if show_state else survives_or_not
+    return '(D) {} {} - (A) {} {}'.format(
+        defender.name,
+        func(dr[1], defender),
+        attacker.name,
+        func(ar[1], attacker)
+    )
+
+
+def describe_combat_result(x):
+    return '(D) {} ({:0>2}) vs (A) {} ({:0>2})'.format(x[1][0],x[1][1], x[0][0], x[0][1])
+
+
+def print_combat_results(fight):
+    attacker_rerolls = 1
+    defender_rerolls = 1
+    combat_probs = fight.fight(attacker_rerolls, defender_rerolls)
+    print('Combat Results:\n--------------')
+    print('attacker rerolls: {}\n'.format(attacker_rerolls))
+    print('defender rerolls: {}\n'.format(defender_rerolls))
+    print('Survibability:\n')
+    probs = combat_probs.map(lambda x: kill_or_not(x, fight.attacker, fight.defender))
+    print(probs.as_string('%-',nb_decimals=2))
+    print('\nOperative state:\n')
+    probs = combat_probs.map(lambda x: kill_or_not(x, fight.attacker, fight.defender, True))
+    print(probs.as_string('%-',nb_decimals=2))
+    print('\nFull Probs:\n')
+    probs = combat_probs.map(describe_combat_result)
+    print(probs.as_string('%-',nb_decimals=2))
 
 
 
